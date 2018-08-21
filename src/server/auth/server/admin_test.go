@@ -1685,18 +1685,46 @@ func TestSAMLBasic(t *testing.T) {
 	ACSURL := fmt.Sprintf("http://%s/saml/acs", net.JoinHostPort(host, samlPort))
 	MetadataURL := fmt.Sprintf("http://%s/saml/metadata", net.JoinHostPort(host, samlPort))
 
+	// Serve IdP metadata (since our SAML implementation will query the IdP
+	// endpoint as part of handling the SAML response)
+	var server *http.Server
+	var idpMetadataChan chan int
+	go func() {
+		idp := saml.IdentityProvider{}
+		l, err := net.Listen("tcp", "") // pick unused port on all IPs
+		require.NoError(t, err)
+		fmt.Printf(">>> addr: %#v\n", l.Addr())
+		idpMetadataChan <- l.Addr().(*net.TCPAddr).Port
+		server = &http.Server{Handler: http.HandlerFunc(idp.ServeMetadata)}
+		server.Serve(l)
+	}()
+	defer func() {
+		server.Shutdown(context.Background())
+	}()
+	idpMetadataPort := <-idpMetadataChan
+	fmt.Printf(">>> idpMetadataPort: %#v\n", idpMetadataPort)
+
 	// Set a configuration
-	adminClient.SetConfiguration(adminClient.Ctx(), &auth.SetConfigurationRequest{
-		Configuration: &auth.AuthConfig{
-			LiveConfigVersion: 0,
-			IDProviders: []*auth.IDProvider{
-				{Name: "idp_1", Description: "fake IdP for testing"},
+	require.NoErrorWithinT(t, 30*time.Second, func() error {
+		_, err = adminClient.SetConfiguration(adminClient.Ctx(), &auth.SetConfigurationRequest{
+			Configuration: &auth.AuthConfig{
+				LiveConfigVersion: 0,
+				IDProviders: []*auth.IDProvider{
+					{
+						Name:        "idp_1",
+						Description: "fake IdP for testing",
+						SAML: &auth.IDProvider_SAMLOptions{
+							MetadataURL: fmt.Sprintf("http://localhost:%d/", idpMetadataPort),
+						},
+					},
+				},
+				SAMLServiceOptions: &auth.AuthConfig_SAMLServiceOptions{
+					ACSURL:      ACSURL,
+					MetadataURL: MetadataURL,
+				},
 			},
-			SAMLServiceOptions: &auth.AuthConfig_SAMLServiceOptions{
-				ACSURL:      ACSURL,
-				MetadataURL: MetadataURL,
-			},
-		},
+		})
+		return err
 	})
 
 	// Send SAML response (simulated IdP) to SAML endpoint & expect redirect
